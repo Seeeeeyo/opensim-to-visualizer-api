@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: opensim-converter-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9 
