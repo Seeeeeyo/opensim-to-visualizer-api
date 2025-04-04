@@ -39,6 +39,16 @@ class ConversionResponse(BaseModel):
                       "application/octet-stream": {}
                   },
                   "description": "Returns either JSON data or a downloadable file"
+              },
+              400: {
+                  "description": "Invalid file format or patella-related error",
+                  "content": {
+                      "application/json": {
+                          "example": {
+                              "detail": "The patella is present in the model, but beta is not present in the motion file. Please upload a model with no patella or a motion file with beta."
+                          }
+                      }
+                  }
               }
           })
 async def convert_opensim_to_visualizer_json(
@@ -117,6 +127,18 @@ async def convert_opensim_to_visualizer_json(
             # Return the JSON content
             return JSONResponse(content=result)
     
+    except ValueError as e:
+        # Clean up on error
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        # Check if this is the patella-related error
+        if "patella" in str(e) and "beta" in str(e):
+            logger.warning("Patella-related error: %s", str(e))
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        logger.exception("Value error processing files")
+        raise HTTPException(status_code=500, detail=f"Error processing files: {str(e)}")
+        
     except Exception as e:
         # Clean up on error
         shutil.rmtree(temp_dir, ignore_errors=True)
