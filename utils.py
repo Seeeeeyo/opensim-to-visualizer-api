@@ -82,6 +82,16 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
     
     # We may have deleted some columns
     stateNames = stateNamesOut
+
+    # check if there is a name containing 'beta' in the stateNames values.
+    beta_present = False
+    for stateName in stateNames:
+        if 'beta' in stateName:
+            beta_present = True
+            break
+    
+    if beta_present:
+        logger.info("Beta is present in the motion file")
                           
     state = model.initSystem()
     
@@ -102,6 +112,11 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
     visualizeDict['bodies'] = {}
     
     for body in bodyset:
+        if 'patella' in body.getName() and not beta_present:
+            logger.info(f"Processing body: {body.getName()}")
+            # raise an error to stop the program
+            raise ValueError("The patella is present in the model, but beta is not present in the motion file. Please upload a model with no patella or a motion file with beta.")
+
         visualizeDict['bodies'][body.getName()] = {}
         attachedGeometries = []
         
@@ -143,6 +158,8 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
             # geometry origin. Ayman said getting transform to Geometry::Mesh is safest
             # but we don't have access to it thru API and Ayman said what we're doing
             # is OK for now
+            if not beta_present and 'patella' in body.getName():
+                continue
             visualizeDict['bodies'][body.getName()]['rotation'].append(body.getTransformInGround(state).R().convertRotationToBodyFixedXYZ().to_numpy().tolist())
             visualizeDict['bodies'][body.getName()]['translation'].append(body.getTransformInGround(state).T().to_numpy().tolist())
             
@@ -152,8 +169,12 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
     return   
 
 if __name__ == "__main__":
-    mocap_model_file = 'model.osim'
-    mocap_if_file = 'motion.mot'
-    output_mocap_json_path = 'output.json'
+    # mocap_model_file = 'working/model.osim'
+    # mocap_if_file = 'working/motion.mot'
+    # output_mocap_json_path = 'working/output.json'
+
+    mocap_model_file = 'bug/model.osim'
+    mocap_if_file = 'bug/motion.mot'
+    output_mocap_json_path = 'bug/output.json'
     
     generateVisualizerJson(modelPath=mocap_model_file, ikPath=mocap_if_file, jsonOutputPath=output_mocap_json_path)
