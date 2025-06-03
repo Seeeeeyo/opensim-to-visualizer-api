@@ -35,20 +35,33 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
     columns_to_remove = []
     
     # First identify columns to remove
+    logger.info(f"Initial stateNames from MOT file: {stateNames}")
     for col in stateNames:
         if 'activation' in col:
+            logger.info(f"Identifying for removal (activation criteria): {col}")
             columns_to_remove.append(col)
         elif col[0] == '/' and any(['jointset' not in col, 'value' not in col]): # full state path
+            logger.info(f"Identifying for removal (full path criteria): {col}")
             columns_to_remove.append(col)
+        else:
+            logger.info(f"Column kept (at identification stage): {col}")
     
     # Remove identified columns
+    logger.info(f"Columns identified for removal: {columns_to_remove}")
     for col in columns_to_remove:
-        stateTable.removeColumn(col)
+        logger.info(f"Attempting to remove column: {col}")
+        try:
+            stateTable.removeColumn(col)
+            logger.info(f"Successfully removed column: {col}")
+        except Exception as e:
+            logger.error(f"Failed to remove column {col}: {str(e)}") # Log if removal fails
     
     # Get updated column labels after removal
     stateNames = stateTable.getColumnLabels()
+    logger.info(f"stateNames after removal process: {stateNames}")
     
-    for col in stateNames:
+    for motColIndex, col in enumerate(stateNames):
+        logger.info(f"Processing column: {col} at MOT file index {motColIndex}")
         try:
             # Try to find matching coordinate
             matching_coords = [i for i,c in enumerate(coordNames) if c in col]
@@ -57,31 +70,47 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
                 logger.warning(f"No matching coordinate found for {col}")
                 continue
                 
-            coordCol = matching_coords[0]
+            modelCoordIndex = matching_coords[0]  # Index in the model's coordinate list
             coordName = col
+            logger.info(f"Found matching coordinate: {coordName} at model index {modelCoordIndex}")
             
             if col[0] == '/': # if full state path
                 temp = col[:col.rfind('/')]
                 coordName = temp[temp.rfind('/')+1:]
+                logger.info(f"Extracted coordinate name from path: {coordName}")
                 
+            logger.info(f"Processing data for coordinate: {coordName}")
             for t in range(len(stateTime)):
                 qTemp = np.asarray(stateTable.getDependentColumn(col)[t])
                 if coords.get(coordName).getMotionType() == 1 and inDegrees: # rotation
                     qTemp = np.deg2rad(qTemp)
                 if 'pelvis_ty' in col and not (vertical_offset is None):
                     qTemp -= (vertical_offset - 0.01)
-                q[t,coordCol] = qTemp
+                q[t,modelCoordIndex] = qTemp  # Use model coordinate index for q array
             stateNamesOut.append(coordName) # This is always just coord - never full path
+            logger.info(f"Successfully processed coordinate: {coordName}")
         except Exception as e:
             logger.error(f"Error processing column {col}: {str(e)}")
             continue
-    
+
     # Only proceed if we have states to process
     if not stateNamesOut:
+        logger.error("No valid states found in the motion file that match the model coordinates")
         raise ValueError("No valid states found in the motion file that match the model coordinates")
+    
+    logger.info(f"Successfully processed {len(stateNamesOut)} coordinates: {stateNamesOut}")
     
     # We may have deleted some columns
     stateNames = stateNamesOut
+    
+    # Create a mapping from coordinate name to model coordinate index
+    coordNameToModelIndex = {}
+    for coordName in stateNames:
+        matching_coords = [i for i,c in enumerate(coordNames) if c == coordName]
+        if matching_coords:
+            coordNameToModelIndex[coordName] = matching_coords[0]
+    
+    logger.info(f"Coordinate name to model index mapping: {coordNameToModelIndex}")
 
     # check if there is a name containing 'beta' in the stateNames values.
     beta_present = False
@@ -92,25 +121,35 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
     
     if beta_present:
         logger.info("Beta is present in the motion file")
+    else:
+        logger.info("Beta is NOT present in the motion file")
                           
+    logger.info("Initializing system state...")
     state = model.initSystem()
     
     # Create state Y map
+    logger.info("Creating state variable names in system order...")
     yNames = opensim.createStateVariableNamesInSystemOrder(model)
     systemStateInds = []
     
+    logger.info("Mapping state names to system indices...")
     for stateName in stateNames:
         matching_states = [i for i, y in enumerate(yNames) if stateName + '/value' in y]
         if matching_states:
             systemStateInds.append(matching_states[0])
+            logger.info(f"Mapped {stateName} to system index {matching_states[0]}")
         else:
             logger.warning(f"No matching system state found for {stateName}")
+
+    logger.info(f"Found {len(systemStateInds)} system state mappings")
     
     # Loop over time and bodies
+    logger.info("Starting time loop for body transforms...")
     visualizeDict = {}
     visualizeDict['time'] = stateTime
     visualizeDict['bodies'] = {}
     
+    logger.info(f"Processing {bodyset.getSize()} bodies...")
     for body in bodyset:
         if 'patella' in body.getName() and not beta_present:
             logger.info(f"Processing body: {body.getName()}")
@@ -146,8 +185,10 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
     for iTime, time in enumerate(stateTime): 
         yVec = np.zeros((state.getNY())).tolist()
         for i, idx in enumerate(systemStateInds):
-            if i < len(q[iTime]):
-                yVec[idx] = q[iTime,i]
+            coordName = stateNames[i]  # Get coordinate name by position in stateNames
+            modelCoordIdx = coordNameToModelIndex[coordName]  # Get model coordinate index
+            if modelCoordIdx < q.shape[1]:  # Check bounds using model coordinate index
+                yVec[idx] = q[iTime, modelCoordIdx]  # Use model coordinate index to access q
         state.setY(opensim.Vector(yVec))
         
         model.realizePosition(state)
@@ -173,8 +214,8 @@ if __name__ == "__main__":
     # mocap_if_file = 'working/motion.mot'
     # output_mocap_json_path = 'working/output.json'
 
-    mocap_model_file = 'bug/model.osim'
-    mocap_if_file = 'bug/motion.mot'
-    output_mocap_json_path = 'bug/output.json'
+    mocap_model_file = 'dynamics/LaiUhlrich2022_scaled_no_patella.osim'
+    mocap_if_file = 'dynamics/working.mot'
+    output_mocap_json_path = 'dynamics/normal.json'
     
     generateVisualizerJson(modelPath=mocap_model_file, ikPath=mocap_if_file, jsonOutputPath=output_mocap_json_path)
