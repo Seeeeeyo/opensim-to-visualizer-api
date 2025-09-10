@@ -7,13 +7,124 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# %% This takes model and IK and generates a json of body transforms that can 
+def removePatellaFromModelXML(modelPath):
+    """
+    Remove patella-related components from an OpenSim model by modifying the XML file directly.
+    This approach is more reliable than trying to modify the loaded model.
+
+    Removes:
+    - Patella bodies (patella_r, patella_l)
+    - Patellofemoral joints
+    - Patellofemoral constraints
+    - Muscles that attach to patella: recfem_r/l, vasint_r/l, vaslat_r/l, vasmed_r/l
+    - Any PathPoint references to patella bodies
+
+    Args:
+        modelPath: Path to OpenSim model file (.osim)
+
+    Returns:
+        Modified model path (same as input, file is modified in-place)
+    """
+    logger.info(f"Starting XML-based patella removal for: {modelPath}")
+
+    # Read the model file
+    with open(modelPath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    original_length = len(content)
+    logger.info(f"Original file size: {original_length} characters")
+
+    # Create backup
+    backup_path = modelPath + '.backup'
+    with open(backup_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+    logger.info(f"Created backup: {backup_path}")
+
+    # Remove patella bodies
+    import re
+
+    # Pattern to match entire Body elements for patella
+    patella_body_pattern = r'<Body name="patella_[rl]">.*?</Body>'
+    content = re.sub(patella_body_pattern, '', content, flags=re.DOTALL)
+    logger.info("Removed patella body elements from XML")
+
+    # Remove patellofemoral joints
+    patella_joint_pattern = r'<CustomJoint name="patellofemoral_[rl]">.*?</CustomJoint>'
+    content = re.sub(patella_joint_pattern, '', content, flags=re.DOTALL)
+    logger.info("Removed patellofemoral joint elements from XML")
+
+    # Remove patellofemoral constraints
+    patella_constraint_pattern = r'<CoordinateCouplerConstraint name="patellofemoral_.*?</CoordinateCouplerConstraint>'
+    content = re.sub(patella_constraint_pattern, '', content, flags=re.DOTALL)
+    logger.info("Removed patellofemoral constraint elements from XML")
+
+    # Remove patella muscles
+    patella_muscles = ['recfem_r', 'vasint_r', 'vaslat_r', 'vasmed_r', 'recfem_l', 'vasint_l', 'vaslat_l', 'vasmed_l']
+    for muscle in patella_muscles:
+        muscle_pattern = f'<Millard2012EquilibriumMuscle name="{muscle}">.*?</Millard2012EquilibriumMuscle>'
+        content = re.sub(muscle_pattern, '', content, flags=re.DOTALL)
+        logger.info(f"Removed muscle {muscle} from XML")
+
+    # Remove any remaining PathPoint references to patella
+    patella_pathpoint_pattern = r'<PathPoint[^>]*>.*?<socket_parent_frame>/bodyset/patella_[rl]</socket_parent_frame>.*?</PathPoint>'
+    content = re.sub(patella_pathpoint_pattern, '', content, flags=re.DOTALL)
+    logger.info("Removed PathPoint elements referencing patella from XML")
+
+    # Also remove any socket_parent references to patella in PhysicalOffsetFrame
+    patella_socket_pattern = r'<socket_parent>/bodyset/patella_[rl]</socket_parent>'
+    content = re.sub(patella_socket_pattern, '', content)
+    logger.info("Removed socket_parent references to patella from XML")
+
+    # Write back the modified content
+    with open(modelPath, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    new_length = len(content)
+    reduction = original_length - new_length
+    logger.info(f"Modified file size: {new_length} characters (reduced by {reduction} characters)")
+    logger.info("XML-based patella removal completed")
+
+    return modelPath
+
+
+# Note: The old model-based patella removal function has been replaced
+# with the more reliable XML-based approach (removePatellaFromModelXML)
+
+
+# %% This takes model and IK and generates a json of body transforms that can
 # be passed to the webapp visualizer
-def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
-                           vertical_offset=None):
-    
+def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=True,
+                           vertical_offset=None, removePatella=True):
+    """
+    Generate JSON visualization data from OpenSim model and motion files.
+
+    Args:
+        modelPath: Path to OpenSim model file (.osim)
+        ikPath: Path to motion file (.mot)
+        jsonOutputPath: Path for output JSON file
+        statesInDegrees: Whether motion data is in degrees (default: True)
+        vertical_offset: Vertical offset to apply to pelvis (optional)
+        removePatella: Whether to remove patella components from model (default: True)
+
+    Returns:
+        None (writes JSON file to jsonOutputPath)
+    """
+
+
+    # Patella removal functionality has been implemented above.
+    # The model will have patella components removed if removePatella=True
+
+
     opensim.Logger.setLevelString('error')
+
+    # Remove patella components from XML if requested
+    if removePatella:
+        logger.info("Using XML-based patella removal approach")
+        modelPath = removePatellaFromModelXML(modelPath)
+
+    # Now load the cleaned model
     model = opensim.Model(modelPath)
+
     bodyset = model.getBodySet()
     
     coords = model.getCoordinateSet()
@@ -151,10 +262,7 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
     
     logger.info(f"Processing {bodyset.getSize()} bodies...")
     for body in bodyset:
-        if 'patella' in body.getName() and not beta_present:
-            logger.info(f"Processing body: {body.getName()}")
-            # raise an error to stop the program
-            raise ValueError("The patella is present in the model, but beta is not present in the motion file. Please upload a model with no patella or a motion file with beta.")
+        # Note: Patella bodies should have been removed if removePatella=True
 
         visualizeDict['bodies'][body.getName()] = {}
         attachedGeometries = []
@@ -195,12 +303,11 @@ def generateVisualizerJson(modelPath,ikPath,jsonOutputPath,statesInDegrees=True,
         
         # get body translations and rotations in ground
         for body in bodyset:
-            # This gives us body transform to opensim body frame, which isn't nec. 
+            # This gives us body transform to opensim body frame, which isn't nec.
             # geometry origin. Ayman said getting transform to Geometry::Mesh is safest
             # but we don't have access to it thru API and Ayman said what we're doing
             # is OK for now
-            if not beta_present and 'patella' in body.getName():
-                continue
+            # Note: Patella bodies should have been removed if removePatella=True
             visualizeDict['bodies'][body.getName()]['rotation'].append(body.getTransformInGround(state).R().convertRotationToBodyFixedXYZ().to_numpy().tolist())
             visualizeDict['bodies'][body.getName()]['translation'].append(body.getTransformInGround(state).T().to_numpy().tolist())
             
@@ -214,8 +321,8 @@ if __name__ == "__main__":
     # mocap_if_file = 'working/motion.mot'
     # output_mocap_json_path = 'working/output.json'
 
-    mocap_model_file = 'dynamics/LaiUhlrich2022_scaled_no_patella.osim'
-    mocap_if_file = 'dynamics/working.mot'
-    output_mocap_json_path = 'dynamics/normal.json'
+    mocap_model_file = 'bug/model.osim'
+    mocap_if_file = 'bug/motion.mot'
+    output_mocap_json_path = 'bug/normal_removed_patella.json'
     
-    generateVisualizerJson(modelPath=mocap_model_file, ikPath=mocap_if_file, jsonOutputPath=output_mocap_json_path)
+    generateVisualizerJson(modelPath=mocap_model_file, ikPath=mocap_if_file, jsonOutputPath=output_mocap_json_path, removePatella=True)
