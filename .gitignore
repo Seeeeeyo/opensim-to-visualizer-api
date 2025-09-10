@@ -1,4 +1,4 @@
 __pycache__
-.osim
-.mot
-.json
+*.osim
+*.mot
+*.json
