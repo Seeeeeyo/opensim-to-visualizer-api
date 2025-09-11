@@ -7,6 +7,85 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def validateVisualizerJson(visualizeDict):
+    """
+    Validate the structure of the visualizer JSON to ensure it's complete and valid.
+
+    Args:
+        visualizeDict: The dictionary containing the visualizer data
+
+    Raises:
+        ValueError: If the JSON structure is invalid
+    """
+    # Check top-level structure
+    if not isinstance(visualizeDict, dict):
+        raise ValueError("visualizeDict must be a dictionary")
+
+    required_keys = ['time', 'bodies']
+    for key in required_keys:
+        if key not in visualizeDict:
+            raise ValueError(f"Missing required key: {key}")
+
+    # Validate time array
+    time_data = visualizeDict['time']
+    if not isinstance(time_data, list):
+        raise ValueError("time must be a list")
+    if len(time_data) == 0:
+        raise ValueError("time array cannot be empty")
+
+    # Validate bodies structure
+    bodies_data = visualizeDict['bodies']
+    if not isinstance(bodies_data, dict):
+        raise ValueError("bodies must be a dictionary")
+
+    if len(bodies_data) == 0:
+        raise ValueError("bodies dictionary cannot be empty")
+
+    # Validate each body
+    for body_name, body_data in bodies_data.items():
+        if not isinstance(body_data, dict):
+            raise ValueError(f"Body {body_name} data must be a dictionary")
+
+        required_body_keys = ['attachedGeometries', 'scaleFactors', 'rotation', 'translation']
+        for key in required_body_keys:
+            if key not in body_data:
+                raise ValueError(f"Body {body_name} missing required key: {key}")
+
+        # Validate attachedGeometries
+        attached_geoms = body_data['attachedGeometries']
+        if not isinstance(attached_geoms, list):
+            raise ValueError(f"Body {body_name} attachedGeometries must be a list")
+
+        # Validate scaleFactors
+        scale_factors = body_data['scaleFactors']
+        if not isinstance(scale_factors, list) or len(scale_factors) != 3:
+            raise ValueError(f"Body {body_name} scaleFactors must be a list of 3 numbers")
+
+        # Validate rotation
+        rotation = body_data['rotation']
+        if not isinstance(rotation, list):
+            raise ValueError(f"Body {body_name} rotation must be a list")
+        if len(rotation) != len(time_data):
+            raise ValueError(f"Body {body_name} rotation length ({len(rotation)}) must match time length ({len(time_data)})")
+
+        for i, rot in enumerate(rotation):
+            if not isinstance(rot, list) or len(rot) != 3:
+                raise ValueError(f"Body {body_name} rotation[{i}] must be a list of 3 numbers")
+
+        # Validate translation
+        translation = body_data['translation']
+        if not isinstance(translation, list):
+            raise ValueError(f"Body {body_name} translation must be a list")
+        if len(translation) != len(time_data):
+            raise ValueError(f"Body {body_name} translation length ({len(translation)}) must match time length ({len(time_data)})")
+
+        for i, trans in enumerate(translation):
+            if not isinstance(trans, list) or len(trans) != 3:
+                raise ValueError(f"Body {body_name} translation[{i}] must be a list of 3 numbers")
+
+    logger.info(f"JSON validation passed for {len(bodies_data)} bodies and {len(time_data)} time points")
+
+
 def removePatellaFromModelXML(modelPath):
     """
     Remove patella-related components from an OpenSim model by modifying the XML file directly.
@@ -135,6 +214,11 @@ def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=Tr
     stateTable = opensim.TimeSeriesTable(ikPath)
     stateNames = stateTable.getColumnLabels()
     stateTime = stateTable.getIndependentColumn()
+    # Convert to Python list to ensure it's serializable
+    if hasattr(stateTime, 'to_numpy'):
+        stateTime = stateTime.to_numpy().tolist()
+    elif hasattr(stateTime, '__iter__') and not isinstance(stateTime, (str, bytes)):
+        stateTime = list(stateTime)
     try:
         inDegrees = stateTable.getTableMetaDataAsString('inDegrees') == 'yes'
     except:
@@ -271,18 +355,28 @@ def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=Tr
         # this, so this isn't most general sol'n, but should work for now
         thisFrame = opensim.Frame.safeDownCast(body)
         nGeometries = thisFrame.getPropertyByName('attached_geometry').size()
-        
+
+        # Keep track of the first valid geometry for scale factors
+        first_valid_geometry = None
+
         for iGeom in range(nGeometries):
             attached_geometry = body.get_attached_geometry(iGeom)
             if attached_geometry.getConcreteClassName() == 'Mesh':
                 thisMesh = opensim.Mesh.safeDownCast(attached_geometry)
                 attachedGeometries.append(thisMesh.getGeometryFilename())
+                # Store the first valid geometry for scale factors
+                if first_valid_geometry is None:
+                    first_valid_geometry = attached_geometry
         visualizeDict['bodies'][body.getName()]['attachedGeometries'] = attachedGeometries
 
-        # Only try to get scale factors if there are geometries
-        if nGeometries > 0:
-            scale_factors = attached_geometry.get_scale_factors().to_numpy() 
-            visualizeDict['bodies'][body.getName()]['scaleFactors'] = scale_factors.tolist()
+        # Only try to get scale factors if there are geometries and we found a valid geometry
+        if nGeometries > 0 and first_valid_geometry is not None:
+            try:
+                scale_factors = first_valid_geometry.get_scale_factors().to_numpy()
+                visualizeDict['bodies'][body.getName()]['scaleFactors'] = scale_factors.tolist()
+            except Exception as e:
+                logger.warning(f"Could not get scale factors for body {body.getName()}: {e}")
+                visualizeDict['bodies'][body.getName()]['scaleFactors'] = [1.0, 1.0, 1.0]
         else:
             visualizeDict['bodies'][body.getName()]['scaleFactors'] = [1.0, 1.0, 1.0]
         
@@ -308,21 +402,89 @@ def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=Tr
             # but we don't have access to it thru API and Ayman said what we're doing
             # is OK for now
             # Note: Patella bodies should have been removed if removePatella=True
-            visualizeDict['bodies'][body.getName()]['rotation'].append(body.getTransformInGround(state).R().convertRotationToBodyFixedXYZ().to_numpy().tolist())
-            visualizeDict['bodies'][body.getName()]['translation'].append(body.getTransformInGround(state).T().to_numpy().tolist())
-            
-    with open(jsonOutputPath, 'w') as f:
-        json.dump(visualizeDict, f)
+            try:
+                rotation_matrix = body.getTransformInGround(state).R().convertRotationToBodyFixedXYZ().to_numpy().tolist()
+                translation_vector = body.getTransformInGround(state).T().to_numpy().tolist()
+
+                # Validate that we got valid arrays
+                if isinstance(rotation_matrix, list) and len(rotation_matrix) == 3:
+                    visualizeDict['bodies'][body.getName()]['rotation'].append(rotation_matrix)
+                else:
+                    logger.warning(f"Invalid rotation matrix for body {body.getName()} at time {time}")
+                    visualizeDict['bodies'][body.getName()]['rotation'].append([0.0, 0.0, 0.0])
+
+                if isinstance(translation_vector, list) and len(translation_vector) == 3:
+                    visualizeDict['bodies'][body.getName()]['translation'].append(translation_vector)
+                else:
+                    logger.warning(f"Invalid translation vector for body {body.getName()} at time {time}")
+                    visualizeDict['bodies'][body.getName()]['translation'].append([0.0, 0.0, 0.0])
+
+            except Exception as e:
+                logger.error(f"Error getting transform for body {body.getName()} at time {time}: {e}")
+                visualizeDict['bodies'][body.getName()]['rotation'].append([0.0, 0.0, 0.0])
+                visualizeDict['bodies'][body.getName()]['translation'].append([0.0, 0.0, 0.0])
+
+    # Validate the complete structure before writing
+    try:
+        validateVisualizerJson(visualizeDict)
+        with open(jsonOutputPath, 'w') as f:
+            json.dump(visualizeDict, f)
+        logger.info(f"Successfully wrote visualizer JSON to {jsonOutputPath}")
+    except Exception as e:
+        logger.error(f"Error validating or writing JSON: {e}")
+        raise
 
     return   
 
-if __name__ == "__main__":
-    # mocap_model_file = 'working/model.osim'
-    # mocap_if_file = 'working/motion.mot'
-    # output_mocap_json_path = 'working/output.json'
+def testValidateVisualizerJson():
+    """Test the JSON validation function with various inputs."""
+    # Test valid structure
+    valid_data = {
+        'time': [0.0, 0.1, 0.2],
+        'bodies': {
+            'pelvis': {
+                'attachedGeometries': ['pelvis.vtp'],
+                'scaleFactors': [1.0, 1.0, 1.0],
+                'rotation': [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1], [0.2, 0.2, 0.2]],
+                'translation': [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1], [0.2, 0.2, 0.2]]
+            }
+        }
+    }
 
+    try:
+        validateVisualizerJson(valid_data)
+        print("✓ Valid JSON structure passed validation")
+    except Exception as e:
+        print(f"✗ Valid JSON structure failed validation: {e}")
+
+    # Test invalid structures
+    invalid_cases = [
+        ("Missing time key", {'bodies': {}}),
+        ("Time not a list", {'time': 'not_a_list', 'bodies': {}}),
+        ("Empty time array", {'time': [], 'bodies': {'body': {'attachedGeometries': [], 'scaleFactors': [1,1,1], 'rotation': [], 'translation': []}}}),
+        ("Body missing required key", {'time': [0.0], 'bodies': {'body': {'attachedGeometries': [], 'scaleFactors': [1,1,1]}}}),
+        ("Invalid rotation length", {'time': [0.0, 0.1], 'bodies': {'body': {'attachedGeometries': [], 'scaleFactors': [1,1,1], 'rotation': [[0,0,0]], 'translation': [[0,0,0], [0,0,0]]}}}),
+    ]
+
+    for test_name, invalid_data in invalid_cases:
+        try:
+            validateVisualizerJson(invalid_data)
+            print(f"✗ {test_name} should have failed but passed")
+        except ValueError:
+            print(f"✓ {test_name} correctly failed validation")
+        except Exception as e:
+            print(f"? {test_name} failed with unexpected error: {e}")
+
+
+if __name__ == "__main__":
+    # Run validation tests
+    print("Running JSON validation tests...")
+    testValidateVisualizerJson()
+    print()
+
+    # Original test code
     mocap_model_file = 'bug/model.osim'
     mocap_if_file = 'bug/motion.mot'
     output_mocap_json_path = 'bug/normal_removed_patella.json'
-    
+
     generateVisualizerJson(modelPath=mocap_model_file, ikPath=mocap_if_file, jsonOutputPath=output_mocap_json_path, removePatella=True)

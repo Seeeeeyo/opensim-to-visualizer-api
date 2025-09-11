@@ -89,26 +89,51 @@ async def convert_opensim_to_visualizer_json(
             f.write(await mot_file.read())
         
         # Generate the visualizer JSON
+        logger.info(f"Starting JSON generation for model: {osim_file.filename}, motion: {mot_file.filename}")
         utils.generateVisualizerJson(
             modelPath=osim_temp_path,
             ikPath=mot_temp_path,
             jsonOutputPath=json_temp_path
         )
-        
+
+        # Validate that the JSON file was created and is valid
+        if not os.path.exists(json_temp_path):
+            logger.error("JSON output file was not created")
+            raise HTTPException(status_code=500, detail="Failed to generate visualizer JSON")
+
+        # Read and validate the JSON content
+        try:
+            with open(json_temp_path, 'r') as f:
+                result = json.load(f)
+
+            # Basic validation of the result structure
+            if not isinstance(result, dict) or 'time' not in result or 'bodies' not in result:
+                logger.error("Generated JSON has invalid structure")
+                raise HTTPException(status_code=500, detail="Generated JSON has invalid structure")
+
+            logger.info(f"Successfully generated JSON with {len(result.get('bodies', {}))} bodies and {len(result.get('time', []))} time points")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Generated JSON is not valid JSON: {e}")
+            raise HTTPException(status_code=500, detail="Generated JSON is not valid")
+        except Exception as e:
+            logger.error(f"Error reading generated JSON: {e}")
+            raise HTTPException(status_code=500, detail="Error reading generated JSON")
+
         # Handle response based on download parameter
         if download:
             # For download, we need to create a response with the file
             # We need to make sure the file still exists when the response is processed
             filename = f"visualizer_{os.path.basename(osim_file.filename).replace('.osim', '')}.json"
-            
+
             # For download, create a copy in a persistent location and serve that
             # This ensures the file exists when FastAPI reads it
             output_file = os.path.join(tempfile.gettempdir(), filename)
             shutil.copy2(json_temp_path, output_file)
-            
+
             # Now we can safely clean up our temp directory
             shutil.rmtree(temp_dir, ignore_errors=True)
-            
+
             # Return the persistent file for download
             return FileResponse(
                 path=output_file,
@@ -117,13 +142,9 @@ async def convert_opensim_to_visualizer_json(
                 background=BackgroundTask(lambda: os.unlink(output_file) if os.path.exists(output_file) else None)
             )
         else:
-            # For JSON response, read the file contents
-            with open(json_temp_path, 'r') as f:
-                result = json.load(f)
-            
             # Clean up the temp directory
             shutil.rmtree(temp_dir, ignore_errors=True)
-            
+
             # Return the JSON content
             return JSONResponse(content=result)
     
