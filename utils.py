@@ -172,6 +172,39 @@ def removePatellaFromModelXML(modelPath):
 
 # %% This takes model and IK and generates a json of body transforms that can
 # be passed to the webapp visualizer
+def getOffsetFrameMeshesFromXML(modelPath):
+    """
+    Parse the model XML to build a mapping of body_name -> [mesh_filenames]
+    that includes meshes attached via PhysicalOffsetFrame child components.
+    These are missed by the standard OpenSim API body.get_attached_geometry().
+
+    Returns:
+        dict: {body_name: [mesh_filename, ...]}
+    """
+    import xml.etree.ElementTree as ET
+    result = {}
+    try:
+        tree = ET.parse(modelPath)
+        root = tree.getroot()
+        for body_el in root.iter('Body'):
+            body_name = body_el.get('name')
+            if not body_name:
+                continue
+            meshes = []
+            components = body_el.find('components')
+            if components is not None:
+                for offset_frame in components.iter('PhysicalOffsetFrame'):
+                    for mesh_el in offset_frame.iter('Mesh'):
+                        mesh_file_el = mesh_el.find('mesh_file')
+                        if mesh_file_el is not None and mesh_file_el.text:
+                            meshes.append(mesh_file_el.text.strip())
+            if meshes:
+                result[body_name] = meshes
+    except Exception as e:
+        logger.warning(f"Could not parse offset frame meshes from XML: {e}")
+    return result
+
+
 def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=True,
                            vertical_offset=None, removePatella=True):
     """
@@ -338,6 +371,10 @@ def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=Tr
 
     logger.info(f"Found {len(systemStateInds)} system state mappings")
     
+    # Build a mapping of offset-frame meshes from the XML (API doesn't expose these directly)
+    offsetFrameMeshes = getOffsetFrameMeshesFromXML(modelPath)
+    logger.info(f"Offset frame meshes from XML: {offsetFrameMeshes}")
+
     # Loop over time and bodies
     logger.info("Starting time loop for body transforms...")
     visualizeDict = {}
@@ -348,11 +385,11 @@ def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=Tr
     for body in bodyset:
         # Note: Patella bodies should have been removed if removePatella=True
 
-        visualizeDict['bodies'][body.getName()] = {}
+        body_name = body.getName()
+        visualizeDict['bodies'][body_name] = {}
         attachedGeometries = []
         
-        # Ayman said that meshes could get attached to model in different ways than
-        # this, so this isn't most general sol'n, but should work for now
+        # Geometries directly attached to the body frame
         thisFrame = opensim.Frame.safeDownCast(body)
         nGeometries = thisFrame.getPropertyByName('attached_geometry').size()
 
@@ -363,26 +400,33 @@ def generateVisualizerJson(modelPath, ikPath, jsonOutputPath, statesInDegrees=Tr
             attached_geometry = body.get_attached_geometry(iGeom)
             if attached_geometry.getConcreteClassName() == 'Mesh':
                 thisMesh = opensim.Mesh.safeDownCast(attached_geometry)
-                attachedGeometries.append(thisMesh.getGeometryFilename())
-                # Store the first valid geometry for scale factors
+                geom_filename = thisMesh.getGeometryFilename()
+                attachedGeometries.append(geom_filename)
                 if first_valid_geometry is None:
                     first_valid_geometry = attached_geometry
-        visualizeDict['bodies'][body.getName()]['attachedGeometries'] = attachedGeometries
 
-        # Only try to get scale factors if there are geometries and we found a valid geometry
-        if nGeometries > 0 and first_valid_geometry is not None:
+        # Add any meshes from PhysicalOffsetFrame child components (e.g. ribcage on thorax)
+        for extra_mesh in offsetFrameMeshes.get(body_name, []):
+            if extra_mesh not in attachedGeometries:
+                attachedGeometries.append(extra_mesh)
+                logger.info(f"Added offset-frame mesh '{extra_mesh}' to body '{body_name}'")
+
+        visualizeDict['bodies'][body_name]['attachedGeometries'] = attachedGeometries
+
+        # Only try to get scale factors if we found at least one valid geometry
+        if first_valid_geometry is not None:
             try:
                 scale_factors = first_valid_geometry.get_scale_factors().to_numpy()
-                visualizeDict['bodies'][body.getName()]['scaleFactors'] = scale_factors.tolist()
+                visualizeDict['bodies'][body_name]['scaleFactors'] = scale_factors.tolist()
             except Exception as e:
-                logger.warning(f"Could not get scale factors for body {body.getName()}: {e}")
-                visualizeDict['bodies'][body.getName()]['scaleFactors'] = [1.0, 1.0, 1.0]
+                logger.warning(f"Could not get scale factors for body {body_name}: {e}")
+                visualizeDict['bodies'][body_name]['scaleFactors'] = [1.0, 1.0, 1.0]
         else:
-            visualizeDict['bodies'][body.getName()]['scaleFactors'] = [1.0, 1.0, 1.0]
+            visualizeDict['bodies'][body_name]['scaleFactors'] = [1.0, 1.0, 1.0]
         
         # init body translation and rotations dictionaries
-        visualizeDict['bodies'][body.getName()]['rotation'] = []
-        visualizeDict['bodies'][body.getName()]['translation'] = []
+        visualizeDict['bodies'][body_name]['rotation'] = []
+        visualizeDict['bodies'][body_name]['translation'] = []
     
     for iTime, time in enumerate(stateTime): 
         yVec = np.zeros((state.getNY())).tolist()
@@ -483,8 +527,8 @@ if __name__ == "__main__":
     print()
 
     # Original test code
-    mocap_model_file = 'bug/model.osim'
-    mocap_if_file = 'bug/motion.mot'
-    output_mocap_json_path = 'bug/normal_removed_patella.json'
+    mocap_model_file = 'sam/model.osim'
+    mocap_if_file = 'sam/L.mot'
+    output_mocap_json_path = 'sam/sam.json'
 
     generateVisualizerJson(modelPath=mocap_model_file, ikPath=mocap_if_file, jsonOutputPath=output_mocap_json_path, removePatella=True)

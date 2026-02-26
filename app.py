@@ -90,6 +90,7 @@ async def convert_opensim_to_visualizer_json(
         
         # Generate the visualizer JSON
         logger.info(f"Starting JSON generation for model: {osim_file.filename}, motion: {mot_file.filename}")
+        
         utils.generateVisualizerJson(
             modelPath=osim_temp_path,
             ikPath=mot_temp_path,
